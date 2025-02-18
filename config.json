@@ -1,12 +1,12 @@
 {
   "api_keys": {
     "DANNY": {
-      "api_key": "P5P3ITLYe8lWBrQBe52Ch2m1v0f3pw0VH6b1A6hKmz8jrPxBEYLdcgkdizMo1VRE",
-      "api_secret": "1aCRkdKX548uDegoRETE1Ke6kqHp5cTMKPlIy6o6dQLWEGFsYItxOKz5isYIsUHw"
+      "api_key": "P5",
+      "api_secret": "1a"
     },
     "GIUSEPPE": {
-      "api_key": "h4hYfWmXJpJ9Fa4OyCvMTTwgKREDNlZGRwU6NPA41LPUMzGpruIwkvwNUG8rJW3U",
-      "api_secret": "sJhCwBsHg6OKU9kEACE6uPY9019pVni4Aood3UTomMd5C1uIJ8HvZelqJtw6lrNK"
+      "api_key": "h4",
+      "api_secret": "sJ"
     }
   },
   "IS_REAL": true,
