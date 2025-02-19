@@ -1,15 +1,15 @@
 # data_handler.py
 import os
-import time
 import pandas as pd
 import asyncio
 import json
 import logging
 import websockets
-from datetime import datetime, timedelta
+from datetime import datetime
 from sklearn.preprocessing import MinMaxScaler
 import data_api_module
 from indicators import TradingIndicators
+import shutil
 
 # Configurazioni di salvataggio e backup
 SAVE_DIRECTORY = "/mnt/usb_trading_data/processed_data" if os.path.exists("/mnt/usb_trading_data") else "D:/trading_data/processed_data"
@@ -151,16 +151,6 @@ def normalize_data(df):
         logging.error(f"❌ Errore durante la normalizzazione dei dati: {e}")
         return df
 
-def save_processed_data(df, filename):
-    """Salva i dati elaborati in locale e cloud."""
-    try:
-        ensure_directory_exists(SAVE_DIRECTORY)
-        df.to_parquet(filename, index=True)
-        logging.info(f"✅ Dati salvati in: {filename}")
-    except Exception as e:
-        logging.error(f"❌ Errore durante il salvataggio dei dati: {e}")
 
-if __name__ == "__main__":
-    logging.info("🚀 Avvio data_handler con separazione dati storici e scalping...")
-    asyncio.run(consume_websocket())
-    asyncio.run(fetch_and_prepare_historical_data())
+::contentReference[oaicite:0]{index=0}
+ 
