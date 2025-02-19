@@ -10,21 +10,37 @@ import logging
 import os
 import json
 import requests
+from logging.handlers import RotatingFileHandler
 
-# 📌 Configurazione logging avanzata
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-
-# 📌 Percorsi per backup delle performance del bot
+# 📌 Configurazione logging avanzata con rotazione dei file
 BACKUP_DIR = "/mnt/usb_trading_data/trading_performance" if os.path.exists("/mnt/usb_trading_data") else "D:/trading_backup"
 os.makedirs(BACKUP_DIR, exist_ok=True)
 
+log_file = os.path.join(BACKUP_DIR, 'trading_env.log')
+handler = RotatingFileHandler(log_file, maxBytes=1e6, backupCount=5)
+logging.basicConfig(handlers=[handler], level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+# 📌 URL per il backup su Cloud
 CLOUD_BACKTEST_URL = "https://your-cloud-backtesting.com/run"  # Esempio di API cloud
+CLOUD_BACKUP_URL = "https://your-cloud-backup-service.com/upload"
+
+def backup_to_cloud(file_path):
+    """Esegue il backup dei dati di trading su cloud."""
+    try:
+        with open(file_path, 'rb') as f:
+            response = requests.post(CLOUD_BACKUP_URL, files={'file': f})
+        if response.status_code == 200:
+            logging.info("✅ Backup su cloud riuscito.")
+        else:
+            logging.error("❌ Backup su cloud fallito.")
+    except Exception as e:
+        logging.error(f"❌ Errore durante il backup su cloud: {e}")
 
 class TradingEnv(gym.Env):
     """
-    Ambiente di trading AI con supporto per più account.
+    Ambiente di trading AI con supporto per scalping e multi-account.
     """
-    def __init__(self, data: pd.DataFrame, initial_balances={"Danny": 1000, "Giuseppe": 1000}):
+    def __init__(self, data: pd.DataFrame, initial_balances={"Danny": 100, "Giuseppe": 100}):
         super(TradingEnv, self).__init__()
         self.data = data_handler.load_normalized_data(data)
         self.current_step = 0
@@ -45,12 +61,16 @@ class TradingEnv(gym.Env):
         # AI Trading Agent (DRL) per ogni account
         self.drl_agents = {account: drl_agent.DRLAgent(model_type='PPO', data=self.data) for account in self.accounts}
 
+        # 📌 Modalità scalping per alta volatilità
+        self.scalping_mode = {account: False for account in self.accounts}
+
     def reset(self):
         """Resetta l'ambiente e registra lo stato iniziale per il backtesting."""
         self.current_step = 0
         for account in self.accounts:
             self.accounts[account]["balance"] = self.accounts[account]["net_worth"]
             self.accounts[account]["shares_held"] = 0
+            self.scalping_mode[account] = False
         self.log_performance("RESET")
         return self._get_observation()
 
@@ -58,6 +78,12 @@ class TradingEnv(gym.Env):
         """Esegue un'azione nel mercato per ogni account e registra i dati di performance."""
         for account, action in actions.items():
             self._take_action(account, action)
+
+            # 📌 Attivazione Scalping se il mercato è volatile
+            if self._is_scalping_condition():
+                logging.info(f"⚡ Attivazione scalping per {account}")
+                self.scalping_mode[account] = True
+
         self.current_step += 1
         done = self.current_step >= self.max_steps - 1
         rewards = {account: self.accounts[account]["net_worth"] - self.accounts[account]["balance"] for account in self.accounts}
@@ -85,61 +111,7 @@ class TradingEnv(gym.Env):
         # Aggiorna il net worth
         self.accounts[account]["net_worth"] = self.accounts[account]["balance"] + (self.accounts[account]["shares_held"] * current_price)
 
-    def _get_observation(self):
-        """Ottiene i dati di mercato e indicatori per l'AI."""
-        market_data = self.data.iloc[self.current_step].values
-        indicators_data = indicators.calculate_indicators(self.data.iloc[:self.current_step + 1])
-        return np.concatenate((market_data, indicators_data))
-
-    def render(self):
-        """Visualizza lo stato attuale del bot e registra le performance."""
-        for account in self.accounts:
-            logging.info(
-                f"📊 {account} → Step: {self.current_step}, Net Worth: {self.accounts[account]['net_worth']:.2f}, "
-                f"Balance: {self.accounts[account]['balance']:.2f}, Shares Held: {self.accounts[account]['shares_held']:.2f}"
-            )
-
-    def log_performance(self, actions):
-        """Registra le operazioni di trading e il net worth nel tempo per ogni account."""
-        performance_data = {
-            "timestamp": self.current_step,
-            "accounts": {account: {"balance": self.accounts[account]["balance"], "net_worth": self.accounts[account]["net_worth"], "shares_held": self.accounts[account]["shares_held"], "action": actions[account]} for account in self.accounts}
-        }
-        backup_file = os.path.join(BACKUP_DIR, "trading_performance.json")
-
-        try:
-            if os.path.exists(backup_file):
-                with open(backup_file, "r") as file:
-                    data = json.load(file)
-            else:
-                data = []
-
-            data.append(performance_data)
-
-            with open(backup_file, "w") as file:
-                json.dump(data, file, indent=4)
-            logging.info("✅ Performance trading registrata con successo per entrambi gli account.")
-        except Exception as e:
-            logging.error(f"⚠️ Errore nel salvataggio delle performance di trading: {e}")
-
-# ==============================
-# 🔹 ESEMPIO DI UTILIZZO
-# ==============================
-
-if __name__ == "__main__":
-    try:
-        logging.info("📥 Caricamento dati elaborati...")
-        data = data_handler.load_normalized_data()
-        env = TradingEnv(data=data, initial_balances={"Danny": 1000, "Giuseppe": 1000})
-        observation = env.reset()
-
-        for step in range(10):
-            actions = {account: env.action_space.sample() for account in env.accounts}
-            observation, rewards, done, _ = env.step(actions)
-            if done:
-                break
-
-        env.render()
-
-    except Exception as e:
-        logging.error(f"❌ Errore nell'esecuzione dell'ambiente di trading: {e}")
+    def _is_scalping_condition(self):
+        """Determina se il mercato è adatto per lo scalping."""
+        volatility = np.std(self.data.iloc[max(0, self.current_step-10):self.current_step]['close'])
+        return volatility > 0.02  # Soglia per attivare scalping
