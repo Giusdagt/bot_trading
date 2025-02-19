@@ -1,3 +1,4 @@
+#DynamicTradingManager.py
 import ccxt
 import json
 import numpy as np
