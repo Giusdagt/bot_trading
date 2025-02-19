@@ -1,9 +1,11 @@
+# data_handler.py
 import os
 import time
 import pandas as pd
 import asyncio
 import json
 import logging
+import websockets
 from datetime import datetime, timedelta
 from sklearn.preprocessing import MinMaxScaler
 import data_api_module
@@ -11,56 +13,87 @@ from indicators import TradingIndicators
 
 # Configurazioni di salvataggio e backup
 SAVE_DIRECTORY = "/mnt/usb_trading_data/processed_data" if os.path.exists("/mnt/usb_trading_data") else "D:/trading_data/processed_data"
-DATA_FILE = "processed_data.parquet"
+HISTORICAL_DATA_FILE = os.path.join(SAVE_DIRECTORY, "historical_data.parquet")
+SCALPING_DATA_FILE = os.path.join(SAVE_DIRECTORY, "scalping_data.parquet")
 RAW_DATA_FILE = "market_data.json"
 MAX_AGE = 30 * 24 * 60 * 60  # 30 giorni in secondi
-ESSENTIAL_COLUMNS = ["timestamp", "coin_id", "close", "open", "high", "low", "volume"]
+
+# WebSocket URL per dati in tempo reale per scalping
+WEBSOCKET_URL = "wss://stream.binance.com:9443/ws/btcusdt@trade"
 
 # Configurazione logging avanzato
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-def ensure_directory_exists(directory):
-    """Crea la directory se non esiste."""
-    if not os.path.exists(directory):
-        os.makedirs(directory)
+# Creazione dello scaler per la normalizzazione dei dati
+scaler = MinMaxScaler()
 
-def should_update_data(filename=DATA_FILE, max_age_days=1):
-    """Controlla se i dati devono essere aggiornati."""
-    file_path = os.path.join(SAVE_DIRECTORY, filename)
-    if not os.path.exists(file_path):
-        return True
-    file_time = datetime.fromtimestamp(os.path.getmtime(file_path))
-    return datetime.now() - file_time > timedelta(days=max_age_days)
-
-async def fetch_and_prepare_data():
-    """Scarica, elabora e salva i dati, con supporto a cloud e backup USB."""
+async def process_websocket_message(message):
+    """Elabora il messaggio ricevuto dal WebSocket per dati real-time per scalping."""
     try:
-        if not should_update_data():
-            logging.info("I dati sono già aggiornati. Carico i dati esistenti.")
-            return load_processed_data()
+        data = json.loads(message)
+        price = float(data["p"])  # Prezzo dell'ultima operazione
+        timestamp = datetime.fromtimestamp(data["T"] / 1000.0)  # Converti timestamp
 
-        logging.info("📥 Avvio del processo di scaricamento ed elaborazione dei dati...")
+        df = pd.DataFrame([[timestamp, price]], columns=["timestamp", "price"])
+        df.set_index("timestamp", inplace=True)
+
+        # Calcolo indicatori tecnici in tempo reale per scalping
+        df["rsi"] = TradingIndicators.relative_strength_index(df)
+        df["macd"], df["macd_signal"] = TradingIndicators.moving_average_convergence_divergence(df)
+        df["ema"] = TradingIndicators.exponential_moving_average(df)
+        df["bollinger_upper"], df["bollinger_lower"] = TradingIndicators.bollinger_bands(df)
+
+        # Normalizzazione dei dati per scalping
+        df = normalize_data(df)
+
+        # Salvataggio dati per scalping
+        save_processed_data(df, SCALPING_DATA_FILE)
+        logging.info(f"✅ Dati scalping aggiornati e salvati: {df.tail(1)}")
+
+    except Exception as e:
+        logging.error(f"❌ Errore nell'elaborazione del messaggio WebSocket: {e}")
+
+async def consume_websocket():
+    """Consuma dati dal WebSocket per operazioni di scalping."""
+    async with websockets.connect(WEBSOCKET_URL) as websocket:
+        logging.info("✅ Connessione WebSocket stabilita per dati real-time.")
+        try:
+            async for message in websocket:
+                await process_websocket_message(message)
+        except websockets.ConnectionClosed:
+            logging.warning("⚠️ Connessione WebSocket chiusa. Riconnessione in corso...")
+            await asyncio.sleep(5)
+            await consume_websocket()
+        except Exception as e:
+            logging.error(f"❌ Errore durante la ricezione dei dati WebSocket: {e}")
+            await asyncio.sleep(5)
+            await consume_websocket()
+
+async def fetch_and_prepare_historical_data():
+    """Scarica, elabora e normalizza i dati storici."""
+    try:
+        if not should_update_data(HISTORICAL_DATA_FILE):
+            logging.info("✅ Dati storici già aggiornati.")
+            return load_processed_data(HISTORICAL_DATA_FILE)
+
+        logging.info("📥 Avvio del processo di scaricamento ed elaborazione dei dati storici...")
         ensure_directory_exists(SAVE_DIRECTORY)
 
-        # Controllo e generazione del file grezzo
         if not os.path.exists(RAW_DATA_FILE):
             logging.warning("⚠️ File JSON grezzo non trovato. Tentativo di scaricamento dati...")
             await data_api_module.main_fetch_all_data("eur")
 
-        return process_raw_data()
+        return process_historical_data()
 
     except Exception as e:
-        logging.error(f"❌ Errore durante il processo di dati: {e}")
+        logging.error(f"❌ Errore durante il processo di dati storici: {e}")
         return pd.DataFrame()
 
-def process_raw_data():
-    """Elabora i dati e li salva come parquet, con supporto per API multiple."""
+def process_historical_data():
+    """Elabora e normalizza i dati storici."""
     try:
-        with open(RAW_DATA_FILE, "r") as json_file:
-            raw_data = json.load(json_file)
-
-        if not raw_data or not isinstance(raw_data, list):
-            raise ValueError("❌ Errore: Dati di mercato non disponibili o non validi.")
+        with open(RAW_DATA_FILE, "r") as file:
+            raw_data = json.load(file)
 
         historical_data_list = []
         for crypto in raw_data:
@@ -87,64 +120,47 @@ def process_raw_data():
                 except Exception as e:
                     logging.error(f"⚠️ Errore nel parsing dei dati storici per {crypto.get('id', 'unknown')}: {e}")
 
-        df_historical = pd.DataFrame(historical_data_list)
+        df = pd.DataFrame(historical_data_list)
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        df.set_index("timestamp", inplace=True)
 
-        if df_historical.empty:
-            raise ValueError("❌ Errore: Nessun dato storico trovato.")
+        # Calcolo degli indicatori tecnici sui dati storici
+        df["rsi"] = TradingIndicators.relative_strength_index(df)
+        df["macd"], df["macd_signal"] = TradingIndicators.moving_average_convergence_divergence(df)
+        df["ema"] = TradingIndicators.exponential_moving_average(df)
+        df["bollinger_upper"], df["bollinger_lower"] = TradingIndicators.bollinger_bands(df)
 
-        df_historical["timestamp"] = pd.to_datetime(df_historical["timestamp"], format="%Y-%m-%d", errors='coerce')
+        # Normalizzazione dei dati storici
+        df = normalize_data(df)
 
-        if df_historical["timestamp"].isnull().any():
-            raise ValueError("⚠️ Errore: Alcuni valori 'timestamp' non sono stati convertiti correttamente.")
-
-        df_historical.set_index("timestamp", inplace=True)
-        df_historical.sort_index(inplace=True)
-
-        # Aggiunta indicatori tecnici
-        df_historical = TradingIndicators.calculate_indicators(df_historical)
-
-        save_processed_data(df_historical)
-        return df_historical
+        save_processed_data(df, HISTORICAL_DATA_FILE)
+        logging.info(f"✅ Dati storici normalizzati e salvati.")
+        return df
 
     except Exception as e:
-        logging.error(f"❌ Errore durante l'elaborazione dei dati grezzi: {e}")
+        logging.error(f"❌ Errore durante l'elaborazione dei dati storici: {e}")
         return pd.DataFrame()
 
-def save_processed_data(df, filename=DATA_FILE):
-    """Salva i dati elaborati su USB o cloud."""
+def normalize_data(df):
+    """Normalizza i dati per il trading AI."""
+    try:
+        cols_to_normalize = ["close", "open", "high", "low", "volume", "rsi", "macd", "macd_signal", "ema", "bollinger_upper", "bollinger_lower"]
+        df[cols_to_normalize] = scaler.fit_transform(df[cols_to_normalize])
+        return df
+    except Exception as e:
+        logging.error(f"❌ Errore durante la normalizzazione dei dati: {e}")
+        return df
+
+def save_processed_data(df, filename):
+    """Salva i dati elaborati in locale e cloud."""
     try:
         ensure_directory_exists(SAVE_DIRECTORY)
-        file_path = os.path.join(SAVE_DIRECTORY, filename)
-        df.to_parquet(file_path, index=True)
-        logging.info(f"✅ Dati salvati in: {file_path}")
+        df.to_parquet(filename, index=True)
+        logging.info(f"✅ Dati salvati in: {filename}")
     except Exception as e:
         logging.error(f"❌ Errore durante il salvataggio dei dati: {e}")
 
-def load_processed_data(filename=DATA_FILE):
-    """Carica i dati elaborati da backup se disponibili."""
-    try:
-        file_path = os.path.join(SAVE_DIRECTORY, filename)
-        if os.path.exists(file_path):
-            df = pd.read_parquet(file_path)
-            logging.info(f"✅ Dati caricati da: {file_path}")
-            return df
-        else:
-            logging.warning(f"⚠️ Nessun file trovato in: {file_path}")
-            return pd.DataFrame()
-    except Exception as e:
-        logging.error(f"❌ Errore durante il caricamento dei dati: {e}")
-        return pd.DataFrame()
-
-def delete_old_data():
-    """Elimina i file più vecchi di MAX_AGE per ottimizzare lo spazio."""
-    now = time.time()
-    for filename in os.listdir(SAVE_DIRECTORY):
-        file_path = os.path.join(SAVE_DIRECTORY, filename)
-        if os.path.isfile(file_path) and (now - os.path.getmtime(file_path) > MAX_AGE):
-            os.remove(file_path)
-            logging.info(f"🗑️ File eliminato: {file_path}")
-
 if __name__ == "__main__":
-    logging.info("🚀 Eseguendo test su data_handler...")
-    asyncio.run(fetch_and_prepare_data())
-    delete_old_data()
+    logging.info("🚀 Avvio data_handler con separazione dati storici e scalping...")
+    asyncio.run(consume_websocket())
+    asyncio.run(fetch_and_prepare_historical_data())
