@@ -16,7 +16,7 @@ CUSTOM_MODULES_PATH = os.path.join(MODULE_PATH, "custom_modules")
 sys.path.append(BOT_SUPREMO_PATH)
 sys.path.append(CUSTOM_MODULES_PATH)
 
-# Lista dei moduli personalizzati
+# Lista aggiornata dei moduli personalizzati
 CUSTOM_MODULES = [
     "ai_model",
     "data_api_module",
@@ -30,70 +30,54 @@ CUSTOM_MODULES = [
     "market_data_apis",
     "portfolio_optimization",
     "risk_management",
-    "trading_environment",
+    "script",  # ✅ Aggiunto modulo per la creazione di nuove logiche
+    "trading_bot",  # ✅ Assicurarsi che il bot principale sia incluso
+    "trading_environment",  # ✅ Ambiente di trading per l'AI
+    "main"  # ✅ Se esiste un main script, aggiungilo qui
 ]
 
-# Caricamento dinamico dei moduli
-LOADED_MODULES = {}
-
-def load_custom_modules():
-    """Carica dinamicamente i moduli personalizzati e gestisce eventuali errori."""
-    for module in CUSTOM_MODULES:
+def import_custom_modules():
+    """Importa dinamicamente i moduli personalizzati."""
+    for module_name in CUSTOM_MODULES:
         try:
-            LOADED_MODULES[module] = importlib.import_module(module)
-            logging.info(f"✅ Modulo caricato con successo: {module}")
-        except ModuleNotFoundError:
-            logging.warning(f"⚠️ Modulo non trovato: {module}. Tentativo di ripristino...")
-            attempt_module_recovery(module)
-        except Exception as e:
-            logging.error(f"❌ Errore nel caricamento del modulo {module}: {str(e)}")
+            importlib.import_module(module_name)
+            logging.info(f"✅ Modulo '{module_name}' importato con successo.")
+        except ImportError as e:
+            logging.error(f"❌ Errore nell'importazione del modulo '{module_name}': {e}")
 
-def attempt_module_recovery(module_name):
-    """Prova a reinstallare o scaricare il modulo in caso di errore."""
-    logging.info(f"🔄 Tentativo di ripristino del modulo {module_name}...")
+def fetch_remote_module(url, module_name):
+    """
+    Scarica un modulo Python da un URL remoto e lo salva nella directory dei moduli personalizzati.
+    
+    :param url: URL del modulo Python da scaricare.
+    :param module_name: Nome del modulo da salvare.
+    """
     try:
-        # Recupero da repository esterno (esempio: GitHub, AWS S3)
-        remote_url = f"https://raw.githubusercontent.com/tuo-repo/{module_name}.py"
-        response = requests.get(remote_url)
-        if response.status_code == 200:
-            module_path = os.path.join(CUSTOM_MODULES_PATH, f"{module_name}.py")
-            with open(module_path, "w", encoding="utf-8") as file:
-                file.write(response.text)
-            logging.info(f"✅ Modulo {module_name} scaricato e ripristinato con successo.")
-        else:
-            logging.error(f"❌ Impossibile scaricare il modulo {module_name}.")
-    except Exception as e:
-        logging.error(f"⚠️ Errore durante il ripristino del modulo {module_name}: {e}")
+        response = requests.get(url)
+        response.raise_for_status()
+        module_path = os.path.join(CUSTOM_MODULES_PATH, f"{module_name}.py")
+        with open(module_path, "w", encoding="utf-8") as file:
+            file.write(response.text)
+        logging.info(f"✅ Modulo '{module_name}' scaricato e salvato in '{module_path}'.")
+    except requests.RequestException as e:
+        logging.error(f"❌ Errore nel download del modulo '{module_name}' da '{url}': {e}")
 
-def execute_custom_modules():
-    """Esegue le funzioni principali dei moduli caricati e distribuisce il carico su server esterni."""
-    for module_name, module in LOADED_MODULES.items():
-        try:
-            if hasattr(module, "run"):
-                logging.info(f"🚀 Esecuzione del modulo: {module_name}")
-                execute_on_server(module)
-            else:
-                logging.warning(f"⚠️ Il modulo {module_name} non ha una funzione 'run' predefinita.")
-        except Exception as e:
-            logging.error(f"❌ Errore durante l'esecuzione del modulo {module_name}: {str(e)}")
+def initialize_bot():
+    """
+    Inizializza il bot importando i moduli personalizzati e scaricando eventuali moduli remoti necessari.
+    """
+    logging.info("🚀 Avvio dell'inizializzazione dei moduli personalizzati...")
+    import_custom_modules()
+    logging.info("✅ Tutti i moduli sono stati importati correttamente.")
 
-def execute_on_server(module):
-    """Distribuisce il carico eseguendo moduli su server esterni se necessario."""
-    logging.info(f"⚡ Controllo del carico di sistema per {module.__name__}...")
-    if os.cpu_count() < 4:  # Se il PC ha poche risorse, delega l'esecuzione a un server
-        logging.info(f"📡 Esecuzione remota del modulo {module.__name__} su server cloud...")
-        # Simulazione dell'invio su Google Colab o AWS
-        remote_execution_url = "https://cloud-execution-endpoint.com/run"
-        try:
-            requests.post(remote_execution_url, json={"module": module.__name__})
-            logging.info(f"✅ Modulo {module.__name__} eseguito con successo su server esterno.")
-        except Exception as e:
-            logging.error(f"⚠️ Errore durante l'esecuzione remota del modulo {module.__name__}: {e}")
-    else:
-        module.run()
+    # Esempio di download di un modulo remoto se necessario
+    remote_modules = {
+        # "example_module": "https://example.com/example_module.py"
+    }
+
+    for module_name, url in remote_modules.items():
+        if module_name not in CUSTOM_MODULES:
+            fetch_remote_module(url, module_name)
 
 if __name__ == "__main__":
-    logging.info("🔄 Avvio del modulo bridge per l'integrazione e gestione dei componenti personalizzati...")
-    load_custom_modules()
-    execute_custom_modules()
-    logging.info("✅ Modulo bridge completato con successo!")
+    initialize_bot()
