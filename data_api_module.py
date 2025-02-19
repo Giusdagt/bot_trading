@@ -33,23 +33,25 @@ if not coingecko_service:
 
 API_KEY = coingecko_service["api_key"]
 
-# 📌 Backup dei dati in locale o su USB
+# 📌 Backup dei dati in locale, USB o Cloud
 STORAGE_PATH = "/mnt/usb_trading_data/market_data.json" if os.path.exists("/mnt/usb_trading_data") else "market_data.json"
+CLOUD_BACKUP = "/mnt/google_drive/trading_backup/market_data.json"
 
 # ===========================
 # 🔹 FUNZIONI DI UTILITÀ
 # ===========================
 
 def calculate_throttle_delay(requests_per_minute):
+    """Calcola il ritardo tra le richieste per rispettare i limiti API."""
     return max(2, 60 / requests_per_minute)
 
 async def fetch_market_data(session, currency, delay, retries=5):
-    """Scarica i dati di mercato attuali e salva un backup in caso di errore."""
+    """Scarica i dati di mercato attuali con gestione avanzata degli errori."""
     url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency={currency}&order=market_cap_desc&per_page=250&page=1&sparkline=false&x_cg_demo_api_key={API_KEY}"
 
     for attempt in range(retries):
         try:
-            async with session.get(url) as response:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as response:
                 if response.status == 200:
                     data = await response.json()
                     save_backup(data, "market_data_backup.json")
@@ -65,7 +67,7 @@ async def fetch_market_data(session, currency, delay, retries=5):
     return load_backup("market_data_backup.json")
 
 async def fetch_historical_data(session, coin_id, currency, delay, days=DAYS_HISTORY, retries=5):
-    """Scarica i dati storici, con gestione avanzata degli errori e failover."""
+    """Scarica i dati storici con gestione avanzata degli errori."""
     global request_count
 
     url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency={currency}&days={days}&interval=daily&x_cg_demo_api_key={API_KEY}"
@@ -79,11 +81,11 @@ async def fetch_historical_data(session, coin_id, currency, delay, days=DAYS_HIS
 
     for attempt in range(retries):
         try:
-            async with session.get(url) as response:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as response:
                 if response.status == 200:
                     data = await response.json()
                     save_backup(data, f"{coin_id}_historical_backup.json")
-                    return format_historical_data(data)
+                    return data
 
         except Exception as e:
             logging.error(f"Errore nella richiesta storica {coin_id}: {e}")
@@ -92,7 +94,7 @@ async def fetch_historical_data(session, coin_id, currency, delay, days=DAYS_HIS
     return load_backup(f"{coin_id}_historical_backup.json")
 
 async def main_fetch_all_data(currency):
-    """Scarica sia i dati di mercato attuali che quelli storici, con supporto a backup USB."""
+    """Scarica sia i dati di mercato attuali che quelli storici, con supporto a backup USB e Cloud."""
     async with aiohttp.ClientSession() as session:
         delay = calculate_throttle_delay(30)
 
@@ -113,10 +115,11 @@ async def main_fetch_all_data(currency):
             final_data.append(crypto)
 
         save_backup(final_data, STORAGE_PATH)
+        sync_to_cloud()
         return final_data
 
 def save_backup(data, filename):
-    """Salva un backup locale o su USB dei dati API."""
+    """Salva un backup locale, su USB e Cloud dei dati API."""
     with open(filename, "w") as file:
         json.dump(data, file, indent=4)
     logging.info(f"✅ Backup dati salvato in {filename}.")
@@ -128,6 +131,16 @@ def load_backup(filename):
             return json.load(file)
     logging.warning(f"⚠️ Backup {filename} non trovato, impossibile recuperare dati.")
     return []
+
+def sync_to_cloud():
+    """Sincronizza i dati di mercato con il Cloud se la USB non è disponibile."""
+    if not os.path.exists(STORAGE_PATH):
+        try:
+            os.makedirs(os.path.dirname(CLOUD_BACKUP), exist_ok=True)
+            shutil.copy(STORAGE_PATH, CLOUD_BACKUP)
+            logging.info("☁️ Dati di mercato sincronizzati su Google Drive.")
+        except Exception as e:
+            logging.error(f"❌ Errore nel backup su Google Drive: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main_fetch_all_data("eur"))
