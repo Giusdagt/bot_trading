@@ -14,91 +14,79 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 # Configurazione del logging avanzato
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # Numero di giorni di dati storici da scaricare
 DAYS_HISTORY = 60  # Default: 60 giorni
 
-# Limite massimo di richieste per minuto (CoinGecko = 30)
-REQUESTS_PER_MINUTE = 30
-request_count = 0  # Contatore richieste
-
 # Caricare le API disponibili
 services = load_market_data_apis()
-coingecko_service = next((ex for ex in services if ex["name"].lower() == "coingecko"), None)
-
-if not coingecko_service:
-    logging.error("Errore: CoinGecko non trovato nel JSON.")
-    sys.exit(1)
-
-API_KEY = coingecko_service["api_key"]
 
 # 📌 Backup dei dati in locale, USB o Cloud
 STORAGE_PATH = "/mnt/usb_trading_data/market_data.json" if os.path.exists("/mnt/usb_trading_data") else "market_data.json"
 CLOUD_BACKUP = "/mnt/google_drive/trading_backup/market_data.json"
 
 # ===========================
-# 🔹 FUNZIONI DI UTILITÀ
+# 🔹 GESTIONE API MULTI-EXCHANGE
 # ===========================
 
-def calculate_throttle_delay(requests_per_minute):
-    """Calcola il ritardo tra le richieste per rispettare i limiti API."""
-    return max(2, 60 / requests_per_minute)
+async def fetch_data_from_exchanges(session, currency):
+    """Scarica dati dai vari exchange e passa al successivo se l'API raggiunge il limite."""
+    for exchange in services["exchanges"]:
+        api_url = exchange["api_url"].replace("{currency}", currency)
+        requests_per_minute = exchange["limitations"]["requests_per_minute"]
 
-async def fetch_market_data(session, currency, delay, retries=5):
+        logging.info(f"🔄 Tentando di recuperare dati da {exchange['name']} ({requests_per_minute} req/min)...")
+        
+        data = await fetch_market_data(session, api_url, requests_per_minute)
+        if data:
+            logging.info(f"✅ Dati ottenuti con successo da {exchange['name']}!")
+            return data
+
+        logging.warning(f"⚠️ Limite raggiunto su {exchange['name']}. Passo al prossimo exchange...")
+
+    logging.error("❌ Nessun exchange disponibile ha fornito dati validi.")
+    return None
+
+async def fetch_market_data(session, url, requests_per_minute, retries=3):
     """Scarica i dati di mercato attuali con gestione avanzata degli errori."""
-    url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency={currency}&order=market_cap_desc&per_page=250&page=1&sparkline=false&x_cg_demo_api_key={API_KEY}"
-
+    delay = max(2, 60 / requests_per_minute)
+    
     for attempt in range(retries):
         try:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as response:
                 if response.status == 200:
-                    data = await response.json()
-                    save_backup(data, "market_data_backup.json")
-                    return data
+                    return await response.json()
                 elif response.status in {400, 429}:
                     wait_time = random.randint(20, 40)
-                    logging.warning(f"Errore {response.status}. Attesa {wait_time} secondi...")
+                    logging.warning(f"⚠️ Errore {response.status}. Attesa {wait_time} secondi prima di riprovare...")
                     await asyncio.sleep(wait_time)
         except Exception as e:
-            logging.error(f"Errore nella richiesta API {currency}: {e}")
+            logging.error(f"❌ Errore nella richiesta API {url}: {e}")
             await asyncio.sleep(delay)
+    
+    return None
 
-    return load_backup("market_data_backup.json")
-
-async def fetch_historical_data(session, coin_id, currency, delay, days=DAYS_HISTORY, retries=5):
+async def fetch_historical_data(session, coin_id, currency, days=DAYS_HISTORY, retries=3):
     """Scarica i dati storici con gestione avanzata degli errori."""
-    global request_count
-
-    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency={currency}&days={days}&interval=daily&x_cg_demo_api_key={API_KEY}"
-    logging.info(f"Scaricando dati storici per {coin_id} ({currency}) da {url}")
-
-    request_count += 1
-    if request_count >= REQUESTS_PER_MINUTE:
-        logging.warning("⚠️ Raggiunto il limite di richieste! Attesa di 60 secondi...")
-        await asyncio.sleep(60)
-        request_count = 0
-
-    for attempt in range(retries):
-        try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    save_backup(data, f"{coin_id}_historical_backup.json")
-                    return data
-
-        except Exception as e:
-            logging.error(f"Errore nella richiesta storica {coin_id}: {e}")
-            await asyncio.sleep(delay)
-
-    return load_backup(f"{coin_id}_historical_backup.json")
+    for exchange in services["exchanges"]:
+        historical_url = exchange["api_url"].replace("{currency}", currency).replace("{symbol}", coin_id)
+        
+        for attempt in range(retries):
+            try:
+                async with session.get(historical_url, timeout=aiohttp.ClientTimeout(total=30)) as response:
+                    if response.status == 200:
+                        return await response.json()
+            except Exception as e:
+                logging.error(f"❌ Errore nel recupero dati storici {coin_id} da {exchange['name']}: {e}")
+                await asyncio.sleep(2 ** attempt)
+    
+    return None
 
 async def main_fetch_all_data(currency):
-    """Scarica sia i dati di mercato attuali che quelli storici, con supporto a backup USB e Cloud."""
+    """Scarica sia i dati di mercato attuali che quelli storici, con failover su più exchange."""
     async with aiohttp.ClientSession() as session:
-        delay = calculate_throttle_delay(30)
-
-        market_data = await fetch_market_data(session, currency, delay)
+        market_data = await fetch_data_from_exchanges(session, currency)
 
         if not market_data:
             logging.error("❌ Errore: dati di mercato non disponibili, uso backup.")
@@ -110,13 +98,17 @@ async def main_fetch_all_data(currency):
             if not coin_id:
                 continue
 
-            historical_data = await fetch_historical_data(session, coin_id, currency, delay)
+            historical_data = await fetch_historical_data(session, coin_id, currency)
             crypto["historical_prices"] = historical_data
             final_data.append(crypto)
 
         save_backup(final_data, STORAGE_PATH)
         sync_to_cloud()
         return final_data
+
+# ===========================
+# 🔹 GESTIONE BACKUP
+# ===========================
 
 def save_backup(data, filename):
     """Salva un backup locale, su USB e Cloud dei dati API."""
